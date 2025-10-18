@@ -35,107 +35,129 @@ def format_time(seconds):
     return str(timedelta(seconds=int(seconds)))
 
 def get_video_info(url):
-    """Get video information using yt-dlp with bot detection bypass"""
-    try:
-        cmd = [
-            'yt-dlp',
-            '--dump-json',
-            '--no-playlist',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            '--extractor-args', 'youtube:player_client=android,web',
-            '--no-check-certificate',
-            url
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
-        info = json.loads(result.stdout)
+    """Get video information using yt-dlp with multiple client fallbacks"""
+    clients_to_try = [
+        ('ios', 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)'),
+        ('android', 'com.google.android.youtube/19.29.37 (Linux; U; Android 13) gzip'),
+        ('tv_embedded', 'Mozilla/5.0 (PlayStation 4 5.55) AppleWebKit/601.2 (KHTML, like Gecko)'),
+    ]
+    
+    for client_name, user_agent in clients_to_try:
+        try:
+            print(f"🔄 Trying {client_name} client...")
+            cmd = [
+                'yt-dlp',
+                '--dump-json',
+                '--no-playlist',
+                '--user-agent', user_agent,
+                '--extractor-args', f'youtube:player_client={client_name}',
+                '--no-check-certificate',
+                '--no-warnings',
+                url
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                info = json.loads(result.stdout)
+                subtitles_available = bool(info.get('subtitles', {})) or bool(info.get('automatic_captions', {}))
 
-        subtitles_available = bool(info.get('subtitles', {})) or bool(info.get('automatic_captions', {}))
-
-        return {
-            'title': info.get('title', 'untitled'),
-            'duration': info.get('duration', 0),
-            'uploader': info.get('uploader', 'Unknown'),
-            'view_count': info.get('view_count', 0),
-            'subtitles_available': subtitles_available
-        }
-    except Exception as e:
-        print(f"❌ Error getting video info: {e}")
-        return None
+                print(f"✅ Successfully got info using {client_name} client")
+                return {
+                    'title': info.get('title', 'untitled'),
+                    'duration': info.get('duration', 0),
+                    'uploader': info.get('uploader', 'Unknown'),
+                    'view_count': info.get('view_count', 0),
+                    'subtitles_available': subtitles_available
+                }
+        except Exception as e:
+            print(f"⚠️ {client_name} client failed: {str(e)[:100]}")
+            continue
+    
+    return None
 
 def download_video_and_transcript(url, video_path, transcript_path, force_hd=True):
-    """Download YouTube video and transcript with bot detection bypass"""
-    try:
-        format_options = [
-            'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/best[height>=1080][ext=mp4]',
-            'bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]/best[height>=720][ext=mp4]',
-            'best[ext=mp4]/best'
-        ]
-
-        cmd = [
-            'yt-dlp',
-            '-f', '/'.join(format_options),
-            '--no-playlist',
-            '--merge-output-format', 'mp4',
-            '-o', video_path,
-            '--write-auto-subs',
-            '--write-subs',
-            '--sub-lang', 'en',
-            '--convert-subs', 'srt',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            '--extractor-args', 'youtube:player_client=android,web',
-            '--no-check-certificate',
-            '--retries', '10',
-            '--fragment-retries', '10',
-            url
-        ]
-
-        print("📥 Downloading video...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            print(f"⚠️ Warning: yt-dlp returned error: {result.stderr}")
-            # Try with mobile client as fallback
-            print("🔄 Retrying with mobile client...")
-            cmd_mobile = [
+    """Download YouTube video and transcript with multiple client fallbacks"""
+    
+    download_configs = [
+        {
+            'name': 'ios',
+            'user_agent': 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)',
+            'client': 'ios',
+            'format': 'best[ext=mp4]/best'
+        },
+        {
+            'name': 'android',
+            'user_agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 13) gzip',
+            'client': 'android',
+            'format': 'best[ext=mp4]/best'
+        },
+        {
+            'name': 'tv_embedded',
+            'user_agent': 'Mozilla/5.0 (PlayStation 4 5.55) AppleWebKit/601.2 (KHTML, like Gecko)',
+            'client': 'tv_embedded',
+            'format': 'best[ext=mp4]/best'
+        },
+    ]
+    
+    for config in download_configs:
+        try:
+            print(f"📥 Downloading with {config['name']} client...")
+            
+            cmd = [
                 'yt-dlp',
-                '-f', 'best[ext=mp4]/best',
+                '-f', config['format'],
                 '--no-playlist',
                 '-o', video_path,
                 '--write-auto-subs',
                 '--write-subs',
                 '--sub-lang', 'en',
                 '--convert-subs', 'srt',
-                '--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
-                '--extractor-args', 'youtube:player_client=android',
+                '--user-agent', config['user_agent'],
+                '--extractor-args', f'youtube:player_client={config["client"]}',
                 '--no-check-certificate',
+                '--retries', '5',
+                '--fragment-retries', '5',
+                '--no-warnings',
                 url
             ]
-            result = subprocess.run(cmd_mobile, capture_output=True, text=True, check=True)
 
-        # Check for transcript
-        video_dir = os.path.dirname(video_path)
-        video_base = os.path.splitext(os.path.basename(video_path))[0]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0 and os.path.exists(video_path):
+                print(f"✅ Successfully downloaded with {config['name']} client")
+                
+                # Check for transcript
+                video_dir = os.path.dirname(video_path)
+                video_base = os.path.splitext(os.path.basename(video_path))[0]
 
-        subtitle_patterns = [
-            f"{video_base}.en.srt",
-            f"{video_base}.en.vtt",
-            f"{video_base}.srt",
-            f"{video_base}.vtt"
-        ]
+                subtitle_patterns = [
+                    f"{video_base}.en.srt",
+                    f"{video_base}.en.vtt",
+                    f"{video_base}.srt",
+                    f"{video_base}.vtt"
+                ]
 
-        transcript_found = False
-        for pattern in subtitle_patterns:
-            potential_file = os.path.join(video_dir, pattern)
-            if os.path.exists(potential_file):
-                convert_srt_to_text(potential_file, transcript_path)
-                transcript_found = True
-                break
+                transcript_found = False
+                if transcript_path:
+                    for pattern in subtitle_patterns:
+                        potential_file = os.path.join(video_dir, pattern)
+                        if os.path.exists(potential_file):
+                            convert_srt_to_text(potential_file, transcript_path)
+                            transcript_found = True
+                            break
 
-        return True, transcript_found
-
-    except Exception as e:
-        print(f"❌ Error downloading video: {e}")
-        return False, False
+                return True, transcript_found
+            else:
+                print(f"⚠️ {config['name']} client failed: {result.stderr[:200]}")
+                
+        except subprocess.TimeoutExpired:
+            print(f"⚠️ {config['name']} client timed out")
+            continue
+        except Exception as e:
+            print(f"⚠️ {config['name']} client error: {str(e)[:100]}")
+            continue
+    
+    return False, False
 
 def convert_srt_to_text(srt_file, text_file):
     """Convert SRT subtitle file to plain text"""
@@ -326,11 +348,11 @@ def process_video(url, interval, output_dir='.', quality='highest',
     # Get video info
     print(f"🔍 Fetching video information...")
     video_info = get_video_info(url)
+    
     if not video_info:
-        print("❌ Failed to get video info. Trying alternative method...")
-        # Try to continue anyway with a generic title
+        print("⚠️ Could not fetch video info, using generic title")
         video_info = {
-            'title': 'youtube_video',
+            'title': f'youtube_video_{os.urandom(4).hex()}',
             'duration': 0,
             'uploader': 'Unknown',
             'view_count': 0,
@@ -362,7 +384,8 @@ def process_video(url, interval, output_dir='.', quality='highest',
         )
 
         if not video_success:
-            print("❌ Error: Failed to download video")
+            print("❌ Error: Failed to download video with all available clients")
+            print("💡 This video may be restricted or unavailable in GitHub Actions region")
             return False
 
         print(f"\n✅ Video downloaded successfully!")
