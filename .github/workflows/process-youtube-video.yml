@@ -43,7 +43,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install system dependencies
         run: |
@@ -53,13 +52,20 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yt-dlp Pillow numpy img2pdf
+          # Install latest yt-dlp to fix compatibility issues
+          pip install --upgrade yt-dlp
+          pip install Pillow numpy img2pdf
           
-      - name: Download processing script
+      - name: Verify yt-dlp installation
         run: |
-          # If script is not in repo, we'll use the one we'll commit
+          yt-dlp --version
+          echo "Testing yt-dlp with video info..."
+          yt-dlp --dump-json --no-playlist "${{ github.event.inputs.youtube_url }}" | head -n 5
+          
+      - name: Make script executable
+        run: |
           if [ ! -f "youtube_screenshot_processor.py" ]; then
-            echo "Script not found in repo. Please add youtube_screenshot_processor.py to your repository."
+            echo "❌ Error: youtube_screenshot_processor.py not found in repository"
             exit 1
           fi
           chmod +x youtube_screenshot_processor.py
@@ -76,12 +82,14 @@ jobs:
             ${{ github.event.inputs.keep_video == 'true' && '--keep-video' || '' }}
             
       - name: List output files
+        if: always()
         run: |
           echo "=== Output Files ==="
-          ls -lR ./output
+          ls -lR ./output || echo "No output directory found"
           
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: screenshots-${{ github.run_number }}
           path: ./output/*/images/
@@ -89,6 +97,7 @@ jobs:
           
       - name: Upload PDF
         uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: pdf-${{ github.run_number }}
           path: ./output/*/*.pdf
@@ -96,7 +105,7 @@ jobs:
           
       - name: Upload transcript
         uses: actions/upload-artifact@v4
-        if: always()
+        if: success()
         with:
           name: transcript-${{ github.run_number }}
           path: ./output/*/*.txt
@@ -104,7 +113,7 @@ jobs:
           
       - name: Upload video (if kept)
         uses: actions/upload-artifact@v4
-        if: github.event.inputs.keep_video == 'true'
+        if: github.event.inputs.keep_video == 'true' && success()
         with:
           name: video-${{ github.run_number }}
           path: ./output/*/*.mp4
