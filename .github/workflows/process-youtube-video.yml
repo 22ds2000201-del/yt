@@ -1,0 +1,126 @@
+name: YouTube Video Screenshot Processor
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'YouTube Video URL'
+        required: true
+        type: string
+      interval:
+        description: 'Screenshot interval in seconds'
+        required: true
+        type: number
+        default: 5
+      quality:
+        description: 'Screenshot quality'
+        required: false
+        type: choice
+        options:
+          - highest
+          - high
+        default: 'highest'
+      pdf_dpi:
+        description: 'PDF DPI quality'
+        required: false
+        type: number
+        default: 600
+      keep_video:
+        description: 'Keep downloaded video file'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp Pillow numpy img2pdf
+          
+      - name: Download processing script
+        run: |
+          # If script is not in repo, we'll use the one we'll commit
+          if [ ! -f "youtube_screenshot_processor.py" ]; then
+            echo "Script not found in repo. Please add youtube_screenshot_processor.py to your repository."
+            exit 1
+          fi
+          chmod +x youtube_screenshot_processor.py
+          
+      - name: Process YouTube video
+        id: process
+        run: |
+          python youtube_screenshot_processor.py \
+            "${{ github.event.inputs.youtube_url }}" \
+            ${{ github.event.inputs.interval }} \
+            --output-dir ./output \
+            --quality ${{ github.event.inputs.quality }} \
+            --pdf-dpi ${{ github.event.inputs.pdf_dpi }} \
+            ${{ github.event.inputs.keep_video == 'true' && '--keep-video' || '' }}
+            
+      - name: List output files
+        run: |
+          echo "=== Output Files ==="
+          ls -lR ./output
+          
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: ./output/*/images/
+          retention-days: 30
+          
+      - name: Upload PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-${{ github.run_number }}
+          path: ./output/*/*.pdf
+          retention-days: 30
+          
+      - name: Upload transcript
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transcript-${{ github.run_number }}
+          path: ./output/*/*.txt
+          retention-days: 30
+          
+      - name: Upload video (if kept)
+        uses: actions/upload-artifact@v4
+        if: github.event.inputs.keep_video == 'true'
+        with:
+          name: video-${{ github.run_number }}
+          path: ./output/*/*.mp4
+          retention-days: 7
+          
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## 📊 Processing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **YouTube URL**: ${{ github.event.inputs.youtube_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Interval**: ${{ github.event.inputs.interval }} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "- **Quality**: ${{ github.event.inputs.quality }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PDF DPI**: ${{ github.event.inputs.pdf_dpi }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📁 Output Files" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          find ./output -type f -exec ls -lh {} \; 2>/dev/null || echo "No files found"
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
