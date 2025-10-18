@@ -52,23 +52,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install latest yt-dlp to fix compatibility issues
           pip install --upgrade yt-dlp
           pip install Pillow numpy img2pdf
-          
-      - name: Verify yt-dlp installation
-        run: |
-          yt-dlp --version
-          echo "Testing yt-dlp with video info..."
-          yt-dlp --dump-json --no-playlist "${{ github.event.inputs.youtube_url }}" | head -n 5
-          
-      - name: Make script executable
-        run: |
-          if [ ! -f "youtube_screenshot_processor.py" ]; then
-            echo "❌ Error: youtube_screenshot_processor.py not found in repository"
-            exit 1
-          fi
-          chmod +x youtube_screenshot_processor.py
           
       - name: Process YouTube video
         id: process
@@ -128,8 +113,3 @@ jobs:
           echo "- **Interval**: ${{ github.event.inputs.interval }} seconds" >> $GITHUB_STEP_SUMMARY
           echo "- **Quality**: ${{ github.event.inputs.quality }}" >> $GITHUB_STEP_SUMMARY
           echo "- **PDF DPI**: ${{ github.event.inputs.pdf_dpi }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📁 Output Files" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          find ./output -type f -exec ls -lh {} \; 2>/dev/null || echo "No files found"
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
