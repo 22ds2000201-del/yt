@@ -1,0 +1,73 @@
+name: Batch Process Multiple Videos
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_urls:
+        description: 'YouTube URLs (one per line)'
+        required: true
+        type: string
+      interval:
+        description: 'Screenshot interval in seconds'
+        required: true
+        type: number
+        default: 5
+      quality:
+        description: 'Screenshot quality'
+        required: false
+        type: choice
+        options:
+          - highest
+          - high
+        default: 'highest'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Parse video URLs
+        id: set-matrix
+        run: |
+          # Convert multi-line input to JSON array
+          urls=$(echo "${{ github.event.inputs.video_urls }}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "matrix={\"url\":$urls}" >> $GITHUB_OUTPUT
+
+  process-videos:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      max-parallel: 3  # Process 3 videos concurrently
+      fail-fast: false
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install -r requirements.txt
+          
+      - name: Process video
+        run: |
+          python youtube_screenshot_processor.py \
+            "${{ matrix.url }}" \
+            ${{ github.event.inputs.interval }} \
+            --output-dir ./output \
+            --quality ${{ github.event.inputs.quality }}
+            
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-${{ strategy.job-index }}
+          path: ./output/
+          retention-days: 30
