@@ -35,10 +35,18 @@ def format_time(seconds):
     return str(timedelta(seconds=int(seconds)))
 
 def get_video_info(url):
-    """Get video information using yt-dlp"""
+    """Get video information using yt-dlp with bot detection bypass"""
     try:
-        cmd = ['yt-dlp', '--dump-json', '--no-playlist', url]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        cmd = [
+            'yt-dlp',
+            '--dump-json',
+            '--no-playlist',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '--extractor-args', 'youtube:player_client=android,web',
+            '--no-check-certificate',
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
         info = json.loads(result.stdout)
 
         subtitles_available = bool(info.get('subtitles', {})) or bool(info.get('automatic_captions', {}))
@@ -51,11 +59,11 @@ def get_video_info(url):
             'subtitles_available': subtitles_available
         }
     except Exception as e:
-        print(f"Error getting video info: {e}")
+        print(f"❌ Error getting video info: {e}")
         return None
 
 def download_video_and_transcript(url, video_path, transcript_path, force_hd=True):
-    """Download YouTube video and transcript"""
+    """Download YouTube video and transcript with bot detection bypass"""
     try:
         format_options = [
             'bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/best[height>=1080][ext=mp4]',
@@ -73,11 +81,36 @@ def download_video_and_transcript(url, video_path, transcript_path, force_hd=Tru
             '--write-subs',
             '--sub-lang', 'en',
             '--convert-subs', 'srt',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '--extractor-args', 'youtube:player_client=android,web',
+            '--no-check-certificate',
+            '--retries', '10',
+            '--fragment-retries', '10',
             url
         ]
 
         print("📥 Downloading video...")
-        subprocess.run(cmd, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(f"⚠️ Warning: yt-dlp returned error: {result.stderr}")
+            # Try with mobile client as fallback
+            print("🔄 Retrying with mobile client...")
+            cmd_mobile = [
+                'yt-dlp',
+                '-f', 'best[ext=mp4]/best',
+                '--no-playlist',
+                '-o', video_path,
+                '--write-auto-subs',
+                '--write-subs',
+                '--sub-lang', 'en',
+                '--convert-subs', 'srt',
+                '--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
+                '--extractor-args', 'youtube:player_client=android',
+                '--no-check-certificate',
+                url
+            ]
+            result = subprocess.run(cmd_mobile, capture_output=True, text=True, check=True)
 
         # Check for transcript
         video_dir = os.path.dirname(video_path)
@@ -294,13 +327,22 @@ def process_video(url, interval, output_dir='.', quality='highest',
     print(f"🔍 Fetching video information...")
     video_info = get_video_info(url)
     if not video_info:
-        return False
+        print("❌ Failed to get video info. Trying alternative method...")
+        # Try to continue anyway with a generic title
+        video_info = {
+            'title': 'youtube_video',
+            'duration': 0,
+            'uploader': 'Unknown',
+            'view_count': 0,
+            'subtitles_available': False
+        }
 
     safe_title = sanitize_filename(video_info['title'])
 
     print(f"\n{'='*60}")
     print(f"📺 Video: {video_info['title']}")
-    print(f"⏱️  Duration: {format_time(video_info['duration'])}")
+    if video_info['duration'] > 0:
+        print(f"⏱️  Duration: {format_time(video_info['duration'])}")
     print(f"👤 Uploader: {video_info['uploader']}")
     print(f"{'='*60}\n")
 
