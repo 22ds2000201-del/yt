@@ -1,0 +1,563 @@
+name: YouTube Screenshot Processor
+
+on:
+  # Manual trigger with inputs
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'YouTube Video URL'
+        required: true
+        type: string
+        default: 'https://youtu.be/-UQ6OZywZ2I?si=qxgmHwp-OpdDPp0i'
+      
+      interval:
+        description: 'Screenshot interval in seconds'
+        required: true
+        type: number
+        default: 5
+      
+      quality:
+        description: 'Video quality'
+        required: false
+        type: choice
+        options:
+          - highest
+          - high
+          - medium
+        default: 'highest'
+      
+      pdf_dpi:
+        description: 'PDF quality (DPI)'
+        required: false
+        type: number
+        default: 600
+      
+      keep_video:
+        description: 'Keep downloaded video file'
+        required: false
+        type: boolean
+        default: false
+
+  # Trigger on push to specific files
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'config/videos.txt'
+      - '.github/workflows/youtube-screenshot-processor.yml'
+
+# Allow only one concurrent workflow
+concurrency:
+  group: youtube-processor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  process-video:
+    name: Process YouTube Video
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      - name: Display Inputs
+        run: |
+          echo "🎬 Processing YouTube Video"
+          echo "================================"
+          echo "URL: ${{ inputs.youtube_url || 'From config file' }}"
+          echo "Interval: ${{ inputs.interval || '5' }} seconds"
+          echo "Quality: ${{ inputs.quality || 'highest' }}"
+          echo "PDF DPI: ${{ inputs.pdf_dpi || '600' }}"
+          echo "Keep Video: ${{ inputs.keep_video || 'false' }}"
+          echo "================================"
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg ghostscript
+          echo "✅ FFmpeg and Ghostscript installed"
+          ffmpeg -version | head -n 1
+      
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp Pillow numpy reportlab
+          echo "✅ Python dependencies installed"
+          yt-dlp --version
+      
+      - name: Create Output Directories
+        run: |
+          mkdir -p outputs/screenshots
+          mkdir -p outputs/pdfs
+          mkdir -p outputs/transcripts
+          echo "✅ Output directories created"
+      
+      - name: Create Processing Script
+        run: |
+          cat > youtube_processor.py << 'PYTHON_SCRIPT_EOF'
+          #!/usr/bin/env python3
+          """
+          YouTube Video Screenshot Processor
+          Extracts screenshots, transcripts, and generates PDFs
+          """
+          
+          import os
+          import sys
+          import re
+          import subprocess
+          import tempfile
+          import shutil
+          from pathlib import Path
+          import json
+          from datetime import datetime, timedelta
+          from PIL import Image
+          import numpy as np
+          
+          def sanitize_filename(filename, max_length=100):
+              """Remove invalid characters from filename"""
+              invalid_chars = '<>:"/\\|?*'
+              for char in invalid_chars:
+                  filename = filename.replace(char, '')
+              filename = filename.strip('. ')
+              return filename[:max_length]
+          
+          def format_timestamp(seconds):
+              """Convert seconds to HH:MM:SS format"""
+              td = timedelta(seconds=int(seconds))
+              hours = td.seconds // 3600
+              minutes = (td.seconds % 3600) // 60
+              secs = td.seconds % 60
+              return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+          
+          def get_video_info(url):
+              """Get video metadata using yt-dlp"""
+              print("📊 Fetching video information...")
+              
+              try:
+                  cmd = [
+                      'yt-dlp',
+                      '--dump-json',
+                      '--no-playlist',
+                      url
+                  ]
+                  
+                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                  
+                  if result.returncode != 0:
+                      raise Exception(f"Failed to get video info: {result.stderr}")
+                  
+                  info = json.loads(result.stdout)
+                  
+                  return {
+                      'title': info.get('title', 'Unknown'),
+                      'duration': info.get('duration', 0),
+                      'uploader': info.get('uploader', 'Unknown'),
+                      'upload_date': info.get('upload_date', 'Unknown'),
+                      'view_count': info.get('view_count', 0),
+                      'description': info.get('description', '')
+                  }
+              
+              except Exception as e:
+                  print(f"⚠️ Error getting video info: {e}")
+                  return {
+                      'title': 'Unknown Video',
+                      'duration': 0,
+                      'uploader': 'Unknown',
+                      'upload_date': 'Unknown',
+                      'view_count': 0,
+                      'description': ''
+                  }
+          
+          def download_video(url, output_path, quality='highest'):
+              """Download video using yt-dlp"""
+              print(f"⬇️ Downloading video in {quality} quality...")
+              
+              format_string = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+              if quality == 'high':
+                  format_string = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best'
+              elif quality == 'medium':
+                  format_string = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best'
+              
+              cmd = [
+                  'yt-dlp',
+                  '-f', format_string,
+                  '--merge-output-format', 'mp4',
+                  '-o', str(output_path),
+                  '--no-playlist',
+                  url
+              ]
+              
+              result = subprocess.run(cmd, capture_output=True, text=True)
+              
+              if result.returncode != 0:
+                  raise Exception(f"Failed to download video: {result.stderr}")
+              
+              print("✅ Video downloaded successfully")
+              return output_path
+          
+          def extract_screenshots(video_path, interval, output_dir):
+              """Extract screenshots from video"""
+              print(f"📸 Extracting screenshots every {interval} seconds...")
+              
+              output_pattern = str(output_dir / "frame_%04d.png")
+              
+              cmd = [
+                  'ffmpeg',
+                  '-i', str(video_path),
+                  '-vf', f'fps=1/{interval}',
+                  '-q:v', '2',
+                  output_pattern,
+                  '-y'
+              ]
+              
+              result = subprocess.run(cmd, capture_output=True, text=True)
+              
+              if result.returncode != 0:
+                  raise Exception(f"Failed to extract screenshots: {result.stderr}")
+              
+              screenshots = sorted(output_dir.glob("frame_*.png"))
+              print(f"✅ Extracted {len(screenshots)} screenshots")
+              
+              return screenshots
+          
+          def get_video_transcript(url):
+              """Get video transcript/subtitles"""
+              print("📝 Fetching transcript...")
+              
+              try:
+                  cmd = [
+                      'yt-dlp',
+                      '--write-auto-sub',
+                      '--sub-lang', 'en',
+                      '--skip-download',
+                      '--sub-format', 'vtt',
+                      '--convert-subs', 'srt',
+                      '-o', 'transcript',
+                      url
+                  ]
+                  
+                  subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                  
+                  srt_file = Path('transcript.en.srt')
+                  if srt_file.exists():
+                      transcript = srt_file.read_text(encoding='utf-8', errors='ignore')
+                      srt_file.unlink()
+                      print("✅ Transcript fetched")
+                      return transcript
+                  
+              except Exception as e:
+                  print(f"⚠️ Could not fetch transcript: {e}")
+              
+              return None
+          
+          def create_pdf_from_screenshots(screenshots, output_pdf, video_info, interval, dpi=600):
+              """Create PDF from screenshots using reportlab"""
+              print("📄 Creating PDF...")
+              
+              try:
+                  from reportlab.lib.pagesizes import letter, A4
+                  from reportlab.lib.units import inch
+                  from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Paragraph, Spacer, PageBreak
+                  from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                  from reportlab.lib.enums import TA_CENTER, TA_LEFT
+                  
+                  # Create PDF
+                  doc = SimpleDocTemplate(
+                      str(output_pdf),
+                      pagesize=letter,
+                      rightMargin=0.5*inch,
+                      leftMargin=0.5*inch,
+                      topMargin=0.5*inch,
+                      bottomMargin=0.5*inch
+                  )
+                  
+                  story = []
+                  styles = getSampleStyleSheet()
+                  
+                  # Title
+                  title_style = ParagraphStyle(
+                      'CustomTitle',
+                      parent=styles['Heading1'],
+                      fontSize=16,
+                      textColor='darkblue',
+                      alignment=TA_CENTER,
+                      spaceAfter=12
+                  )
+                  
+                  story.append(Paragraph(video_info['title'], title_style))
+                  story.append(Spacer(1, 0.2*inch))
+                  
+                  # Metadata
+                  meta_style = ParagraphStyle(
+                      'Meta',
+                      parent=styles['Normal'],
+                      fontSize=10,
+                      alignment=TA_LEFT
+                  )
+                  
+                  metadata = f"""
+                  <b>Uploader:</b> {video_info['uploader']}<br/>
+                  <b>Duration:</b> {format_timestamp(video_info['duration'])}<br/>
+                  <b>Upload Date:</b> {video_info['upload_date']}<br/>
+                  <b>Views:</b> {video_info['view_count']:,}<br/>
+                  <b>Screenshot Interval:</b> {interval} seconds<br/>
+                  <b>Total Screenshots:</b> {len(screenshots)}
+                  """
+                  
+                  story.append(Paragraph(metadata, meta_style))
+                  story.append(PageBreak())
+                  
+                  # Add screenshots
+                  for idx, screenshot in enumerate(screenshots):
+                      timestamp = idx * interval
+                      
+                      # Timestamp caption
+                      caption = f"Screenshot {idx + 1} - {format_timestamp(timestamp)}"
+                      story.append(Paragraph(caption, styles['Normal']))
+                      story.append(Spacer(1, 0.1*inch))
+                      
+                      # Add image
+                      img = RLImage(str(screenshot), width=6*inch, height=4*inch)
+                      story.append(img)
+                      story.append(PageBreak())
+                  
+                  doc.build(story)
+                  print(f"✅ PDF created: {output_pdf}")
+                  
+              except Exception as e:
+                  print(f"⚠️ Error creating PDF: {e}")
+                  raise
+          
+          def save_transcript_txt(transcript, output_txt):
+              """Save transcript to text file"""
+              if transcript:
+                  with open(output_txt, 'w', encoding='utf-8') as f:
+                      f.write(transcript)
+                  print(f"✅ Transcript saved: {output_txt}")
+          
+          def save_metadata_txt(video_info, screenshots, output_txt, interval):
+              """Save video metadata to text file"""
+              with open(output_txt, 'w', encoding='utf-8') as f:
+                  f.write(f"Title: {video_info['title']}\n")
+                  f.write(f"Uploader: {video_info['uploader']}\n")
+                  f.write(f"Duration: {format_timestamp(video_info['duration'])}\n")
+                  f.write(f"Upload Date: {video_info['upload_date']}\n")
+                  f.write(f"Views: {video_info['view_count']:,}\n")
+                  f.write(f"Screenshot Interval: {interval} seconds\n")
+                  f.write(f"Total Screenshots: {len(screenshots)}\n")
+                  f.write(f"\nDescription:\n{video_info['description']}\n")
+              
+              print(f"✅ Metadata saved: {output_txt}")
+          
+          def process_youtube_video(url, interval=5, quality='highest', pdf_dpi=600, keep_video=False):
+              """Main processing function"""
+              print("=" * 60)
+              print("🎬 YouTube Video Screenshot Processor")
+              print("=" * 60)
+              
+              try:
+                  # Get video info
+                  video_info = get_video_info(url)
+                  safe_title = sanitize_filename(video_info['title'])
+                  
+                  # Create temp directory
+                  with tempfile.TemporaryDirectory() as temp_dir:
+                      temp_path = Path(temp_dir)
+                      video_path = temp_path / "video.mp4"
+                      screenshots_dir = temp_path / "screenshots"
+                      screenshots_dir.mkdir(exist_ok=True)
+                      
+                      # Download video
+                      download_video(url, video_path, quality)
+                      
+                      # Extract screenshots
+                      screenshots = extract_screenshots(video_path, interval, screenshots_dir)
+                      
+                      # Get transcript
+                      transcript = get_video_transcript(url)
+                      
+                      # Create output files
+                      output_dir = Path('outputs')
+                      timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                      
+                      pdf_path = output_dir / 'pdfs' / f"{safe_title}_{timestamp}.pdf"
+                      metadata_txt = output_dir / 'transcripts' / f"{safe_title}_{timestamp}_metadata.txt"
+                      transcript_txt = output_dir / 'transcripts' / f"{safe_title}_{timestamp}_transcript.txt"
+                      
+                      # Create PDF
+                      create_pdf_from_screenshots(screenshots, pdf_path, video_info, interval, pdf_dpi)
+                      
+                      # Save metadata
+                      save_metadata_txt(video_info, screenshots, metadata_txt, interval)
+                      
+                      # Save transcript
+                      if transcript:
+                          save_transcript_txt(transcript, transcript_txt)
+                      
+                      # Copy screenshots to output
+                      for idx, screenshot in enumerate(screenshots):
+                          dest = output_dir / 'screenshots' / f"{safe_title}_{timestamp}_{idx:04d}.png"
+                          shutil.copy2(screenshot, dest)
+                      
+                      # Keep video if requested
+                      if keep_video:
+                          video_output = output_dir / f"{safe_title}_{timestamp}.mp4"
+                          shutil.copy2(video_path, video_output)
+                          print(f"✅ Video saved: {video_output}")
+                  
+                  print("\n" + "=" * 60)
+                  print("✅ Processing Complete!")
+                  print("=" * 60)
+                  print(f"📄 PDF: {pdf_path}")
+                  print(f"📝 Metadata: {metadata_txt}")
+                  if transcript:
+                      print(f"📝 Transcript: {transcript_txt}")
+                  print(f"📸 Screenshots: outputs/screenshots/")
+                  print("=" * 60)
+                  
+                  return {
+                      'success': True,
+                      'pdf_path': str(pdf_path),
+                      'metadata_path': str(metadata_txt),
+                      'transcript_path': str(transcript_txt) if transcript else None,
+                      'screenshot_count': len(screenshots)
+                  }
+              
+              except Exception as e:
+                  print(f"\n❌ Error: {e}")
+                  import traceback
+                  traceback.print_exc()
+                  return {'success': False, 'error': str(e)}
+          
+          if __name__ == "__main__":
+              import argparse
+              
+              parser = argparse.ArgumentParser(description='Process YouTube video')
+              parser.add_argument('--url', required=True, help='YouTube video URL')
+              parser.add_argument('--interval', type=int, default=5, help='Screenshot interval in seconds')
+              parser.add_argument('--quality', default='highest', choices=['highest', 'high', 'medium'])
+              parser.add_argument('--pdf-dpi', type=int, default=600, help='PDF DPI')
+              parser.add_argument('--keep-video', action='store_true', help='Keep video file')
+              
+              args = parser.parse_args()
+              
+              result = process_youtube_video(
+                  url=args.url,
+                  interval=args.interval,
+                  quality=args.quality,
+                  pdf_dpi=args.pdf_dpi,
+                  keep_video=args.keep_video
+              )
+              
+              sys.exit(0 if result['success'] else 1)
+          PYTHON_SCRIPT_EOF
+          
+          chmod +x youtube_processor.py
+          echo "✅ Processing script created"
+      
+      - name: Process Video
+        id: process
+        run: |
+          python youtube_processor.py \
+            --url "${{ inputs.youtube_url || 'https://youtu.be/-UQ6OZywZ2I?si=qxgmHwp-OpdDPp0i' }}" \
+            --interval ${{ inputs.interval || 5 }} \
+            --quality ${{ inputs.quality || 'highest' }} \
+            --pdf-dpi ${{ inputs.pdf_dpi || 600 }} \
+            ${{ inputs.keep_video == true && '--keep-video' || '' }}
+      
+      - name: Upload PDF Artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: youtube-pdfs-${{ github.run_number }}
+          path: outputs/pdfs/*.pdf
+          retention-days: 30
+          compression-level: 9
+      
+      - name: Upload Transcript Artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: youtube-transcripts-${{ github.run_number }}
+          path: outputs/transcripts/*.txt
+          retention-days: 30
+          compression-level: 9
+      
+      - name: Upload Screenshot Artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: youtube-screenshots-${{ github.run_number }}
+          path: outputs/screenshots/*.png
+          retention-days: 7
+          compression-level: 9
+      
+      - name: Commit and Push Results (Optional)
+        if: success() && github.event_name == 'push'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add outputs/
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "🤖 Add processed video outputs [skip ci]"
+            git push
+          fi
+      
+      - name: Generate Summary
+        if: always()
+        run: |
+          echo "## 🎬 YouTube Video Processing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -d "outputs/pdfs" ] && [ "$(ls -A outputs/pdfs)" ]; then
+            echo "### ✅ Processing Successful" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Video URL**: \`${{ inputs.youtube_url || 'From config' }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Interval**: ${{ inputs.interval || 5 }} seconds" >> $GITHUB_STEP_SUMMARY
+            echo "- **Quality**: ${{ inputs.quality || 'highest' }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **PDF DPI**: ${{ inputs.pdf_dpi || 600 }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📊 Output Files" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ -d "outputs/pdfs" ]; then
+              echo "**PDFs:**" >> $GITHUB_STEP_SUMMARY
+              ls -lh outputs/pdfs/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ -d "outputs/transcripts" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Transcripts:**" >> $GITHUB_STEP_SUMMARY
+              ls -lh outputs/transcripts/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [ -d "outputs/screenshots" ]; then
+              screenshot_count=$(ls outputs/screenshots/*.png 2>/dev/null | wc -l)
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Screenshots:** $screenshot_count files" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📦 Download artifacts from the workflow run page" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Processing Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Check the workflow logs for details" >> $GITHUB_STEP_SUMMARY
+          fi
