@@ -110,7 +110,7 @@ jobs:
           cat > youtube_processor.py << 'PYTHON_SCRIPT_EOF'
           #!/usr/bin/env python3
           """
-          YouTube Video Screenshot Processor
+          YouTube Video Screenshot Processor - Fixed Version with Bot Detection Bypass
           Extracts screenshots, transcripts, and generates PDFs
           """
           
@@ -123,8 +123,8 @@ jobs:
           from pathlib import Path
           import json
           from datetime import datetime, timedelta
-          from PIL import Image
-          import numpy as np
+          import time
+          import random
           
           def sanitize_filename(filename, max_length=100):
               """Remove invalid characters from filename"""
